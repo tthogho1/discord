@@ -1,0 +1,8 @@
+# Environment variables (contains secrets)
+.env
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/

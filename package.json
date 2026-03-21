@@ -1,0 +1,31 @@
+{
+  "name": "discord",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "start-bot": "ts-node --project tsconfig.bot.json -r dotenv/config src/bot.ts",
+    "build-bot": "tsc --project tsconfig.bot.json"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@discordjs/builders": "^1.13.1",
+    "discord.js": "^14.25.1",
+    "dotenv": "^17.3.1",
+    "openai": "^6.32.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260317.1",
+    "@types/node": "^25.5.0",
+    "hono": "^4.12.8",
+    "nodemon": "^3.1.14",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.76.0"
+  }
+}
