@@ -1,0 +1,11 @@
+name = "askhigma-worker"
+main = "src/askhigma_worker.ts"
+compatibility_date = "2026-03-21"
+
+[vars]
+# Keep secrets out of this file in production; use `wrangler secret put` instead.
+HIGMA_API_BASE_URL = "https://tthogho1-higmachat.hf.space/api/chat"
+# For local development only — set to "true" to skip Discord signature verification
+# Remove or set to "false" in production
+SKIP_VERIFY = "false"
+

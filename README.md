@@ -42,3 +42,24 @@ Mention the bot in any channel message:
 ```
 
 The bot will query the Higma chat API and reply with the answer.
+
+## Worker: `/askhigma` interaction (Cloudflare)
+
+This repository now includes a Cloudflare Worker endpoint that can handle Discord slash command interactions for `/askhigma`.
+
+Setup summary:
+- Add these secrets to your Worker via `wrangler secret put NAME` or set env vars in `wrangler.toml`:
+	- `DISCORD_PUBLIC_KEY` (from Discord Developer Portal)
+	- `HIGMA_API_BASE_URL` (your HIGMA API URL)
+	- `HIGMA_API_KEY` (your HIGMA API key)
+	- `HIGMA_MODEL` (optional)
+
+- Register the command using Discord's application commands API (see spec in project root), then set the Interaction Endpoint URL to your deployed Worker URL.
+
+- Deploy the Worker:
+
+```bash
+npx wrangler deploy
+```
+
+The Worker source is at `src/askhigma_worker.ts` and will verify Discord signatures, call the HIGMA API, and reply with HIGMA's response.
