@@ -3,19 +3,38 @@ import nacl from 'tweetnacl'
 
 type Env = {
   DISCORD_PUBLIC_KEY: string
-  HIGMA_API_BASE_URL: string
+  HIGMA_API_BASE_URL?: string
   SKIP_VERIFY?: string
 }
 
 const MAX_PROMPT_LENGTH = 2000
+// Discord message maximum length
+const DISCORD_MAX_MESSAGE_LEN = 2000
+
+// Default HIGMA API URL (used when binding/secret isn't set)
+const DEFAULT_HIGMA_API_BASE_URL = 'https://tthogho1-higmachat.hf.space/api/chat'
 
 function isPrivateIp(hostname: string) {
   // rudimentary checks for common private IP ranges and localhost
   if (!hostname) return true
   if (/^127\.|^10\.|^192\.168\.|^169\.254\./.test(hostname)) return true
+  // 172.16.0.0 - 172.31.255.255
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname)) return true
   if (/^::1$/.test(hostname)) return true
   if (/^localhost$/i.test(hostname)) return true
   return false
+}
+
+// Small helper to add a timeout to fetch calls
+async function fetchWithTimeout(input: string, init?: any, timeoutMs = 10000) {
+  const controller = new AbortController()
+  const id = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const res = await fetch(input, { ...(init || {}), signal: controller.signal } as any)
+    return res
+  } finally {
+    clearTimeout(id)
+  }
 }
 
 function validateHigmaUrl(urlStr: string) {
@@ -45,6 +64,14 @@ function hexToBytes(hex: string): Uint8Array {
 
 const app = new Hono<{ Bindings: Env }>()
 
+function maskWebhookUrl(u: string) {
+  try {
+    return u.replace(/(webhooks\/[^\/]+\/)[^\/]+\//, '$1****/')
+  } catch {
+    return '(masked)'
+  }
+}
+
 // Middleware: verify Discord request signature and attach raw body
 app.use('*', async (c, next) => {
   if (c.req.method !== 'POST') return c.text('ok')
@@ -54,13 +81,22 @@ app.use('*', async (c, next) => {
   const raw = await c.req.text()
   ;(c.req as any).__raw = raw
 
+  // Debug: log verification-related headers and env flag
+  try {
+    console.info('middleware debug: SKIP_VERIFY=', c.env.SKIP_VERIFY, 'signature=', signature ? '[present]' : '[missing]', 'timestamp=', timestamp)
+  } catch {}
+
   // Allow skipping verification for local testing
   if (c.env.SKIP_VERIFY === 'true') {
+    console.info('SKIP_VERIFY=true — skipping signature verification')
     await next()
     return
   }
 
-  if (!signature || !timestamp) return c.text('invalid signature headers', 401)
+  if (!signature || !timestamp) {
+    console.error('middleware error: missing signature or timestamp headers — signature=', signature ? '[present]' : '[missing]', 'timestamp=', timestamp ? '[present]' : '[missing]')
+    return c.text('invalid signature headers', 401)
+  }
   if (!c.env.DISCORD_PUBLIC_KEY) return c.text('DISCORD_PUBLIC_KEY not configured', 500)
 
   const pubKeyHex = c.env.DISCORD_PUBLIC_KEY.trim()
@@ -79,10 +115,11 @@ app.use('*', async (c, next) => {
     console.error('Signature verification error:', String(err))
     return c.text('signature verification failed', 500)
   }
-
   // Validate HIGMA_API_BASE_URL early to avoid SSRF to local networks
-  if (!validateHigmaUrl(c.env.HIGMA_API_BASE_URL)) {
-    console.error('HIGMA_API_BASE_URL failed validation:', c.env.HIGMA_API_BASE_URL)
+  const higmaBase = c.env.HIGMA_API_BASE_URL ?? DEFAULT_HIGMA_API_BASE_URL
+  console.log(`Using HIGMA_API_BASE_URL: ${higmaBase}`)
+  if (!validateHigmaUrl(higmaBase)) {
+    console.error('HIGMA_API_BASE_URL failed validation:', higmaBase)
     return c.text('HIGMA_API_BASE_URL misconfigured', 500)
   }
 
@@ -141,50 +178,98 @@ app.post('/', async (c) => {
     // Return a deferred response immediately (Discord shows "thinking...")
     // Then use waitUntil to call HIGMA and send the follow-up
     const followUpUrl = `https://discord.com/api/v10/webhooks/${appId}/${token}/messages/@original`
+    const higmaBase = c.env.HIGMA_API_BASE_URL ?? DEFAULT_HIGMA_API_BASE_URL
 
     const runFollowUp = async () => {
-        let content: string
-        try {
-          const res = await fetch(c.env.HIGMA_API_BASE_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query: prompt }),
-          })
+        let content = ''
+        let res: Response | null = null
+        let respText = ''
+        let json: any = null
 
-          const respText = await res.text()
-          let json: any
-          try { json = JSON.parse(respText) } catch { json = null }
+        // Retry loop: up to 3 attempts with exponential backoff (500ms, 1000ms)
+        const maxAttempts = 3
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+            res = await fetchWithTimeout(higmaBase, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ query: prompt }),
+            }, 10000)
 
-          if (!res.ok) {
-            content = json?.error ?? respText ?? `HIGMA error: ${res.status}`
-          } else {
-            content = json?.answer ?? json?.text ?? json?.output ?? respText
+            respText = await res.text()
+            try { json = JSON.parse(respText) } catch { json = null }
+
+            if (res.ok) {
+              content = json?.answer ?? json?.text ?? json?.output ?? respText
+              break
+            } else {
+              content = json?.error ?? respText ?? `HIGMA error: ${res.status}`
+              console.warn(`HIGMA request attempt ${attempt} failed: ${res.status}`)
+              if (attempt < maxAttempts) {
+                const backoff = 500 * Math.pow(2, attempt - 1)
+                console.info(`Retrying HIGMA in ${backoff}ms (attempt ${attempt + 1}/${maxAttempts})`)
+                await new Promise((r) => setTimeout(r, backoff))
+                continue
+              }
+              // last attempt, break to use content as-is
+              break
+            }
+          } catch (err) {
+            content = `Error contacting HIGMA: ${String(err)}`
+            console.warn(`HIGMA request attempt ${attempt} threw: ${String(err)}`)
+            if (attempt < maxAttempts) {
+              const backoff = 500 * Math.pow(2, attempt - 1)
+              console.info(`Retrying HIGMA in ${backoff}ms (attempt ${attempt + 1}/${maxAttempts})`)
+              await new Promise((r) => setTimeout(r, backoff))
+              continue
+            }
+            break
           }
-        } catch (err) {
-          content = `Error contacting HIGMA: ${String(err)}`
         }
 
-        // Truncate if over Discord's 2000 char limit
-        const MAX_LEN = 2000
-        if (content.length > MAX_LEN) {
-          content = content.slice(0, MAX_LEN - 30) + '\n\n…(truncated, too long)'
+        // Truncate if over Discord's message limit
+        if (content.length > DISCORD_MAX_MESSAGE_LEN) {
+          content = content.slice(0, DISCORD_MAX_MESSAGE_LEN - 30) + '\n\n…(truncated, too long)'
         }
 
         // Send follow-up via Discord webhook
         try {
+          // Include HTTP status and an excerpt of the response alongside the content
+          const statusLine = `Status: ${res?.status ?? 'no response'}`
+          const excerptSource = json?.answer ?? json?.text ?? json?.output ?? respText ?? ''
+          const excerpt = String(excerptSource).replace(/\s+/g, ' ').slice(0, 300)
+
+          let contentWithMeta = `${statusLine}\nExcerpt: ${excerpt}\n\n${content}`
+
+          // Truncate if over Discord's message limit
+          if (contentWithMeta.length > DISCORD_MAX_MESSAGE_LEN) {
+            contentWithMeta = contentWithMeta.slice(0, DISCORD_MAX_MESSAGE_LEN - 30) + '\n\n…(truncated, too long)'
+          }
+
+          // Log masked webhook and a short preview of the payload for debugging
+          console.info('Follow-up webhook (masked):', maskWebhookUrl(followUpUrl))
+          console.info('Follow-up payload length:', contentWithMeta.length, 'preview:', contentWithMeta.slice(0, 300))
+
           const followUpRes = await fetch(followUpUrl, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ content }),
+            body: JSON.stringify({ content: contentWithMeta }),
           })
+
+          const followUpText = await followUpRes.text().catch(() => '(no body)')
           if (!followUpRes.ok) {
-            console.error('Follow-up failed:', followUpRes.status, await followUpRes.text())
+            console.error('Follow-up failed:', followUpRes.status, followUpText)
+            if (followUpRes.status === 1016) {
+              console.error('Discord returned 1016 — likely webhook/token issue (masked URL):', maskWebhookUrl(followUpUrl))
+            }
             // Try sending a short fallback so Discord stops "thinking..."
             await fetch(followUpUrl, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ content: '⚠️ Response failed — please try again.' }),
             })
+          } else {
+            console.info('Follow-up succeeded:', followUpRes.status)
           }
         } catch (patchErr) {
           console.error('Follow-up PATCH threw:', String(patchErr))
