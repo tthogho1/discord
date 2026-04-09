@@ -7,5 +7,5 @@ compatibility_date = "2026-03-21"
 HIGMA_API_BASE_URL = "https://tthogho1-higmachat.hf.space/api/chat"
 # For local development only — set to "true" to skip Discord signature verification
 # Remove or set to "false" in production
-SKIP_VERIFY = "false"
+SKIP_VERIFY = "true"
 
